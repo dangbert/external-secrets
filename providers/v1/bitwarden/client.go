@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -124,14 +125,21 @@ func (p *Provider) isExactlySameSecret(sec *SecretResponse, remoteKey, note, pro
 	return sec.Key == remoteKey &&
 		sec.Value == string(value) &&
 		sec.Note == note &&
-		ptr.Deref(sec.ProjectID, "") == projectID
+		secretBelongsToProject(sec, projectID)
 }
 
 func (p *Provider) isOnlyValueDifferent(sec *SecretResponse, remoteKey, note, projectID string, value []byte) bool {
 	return sec.Key == remoteKey &&
 		sec.Value != string(value) &&
 		sec.Note == note &&
-		ptr.Deref(sec.ProjectID, "") == projectID
+		secretBelongsToProject(sec, projectID)
+}
+
+// secretBelongsToProject returns true when sec is associated with projectID,
+// checking both the singular "projectId" field and the plural "projectIds" array
+// because the Bitwarden SDK proxy may populate either depending on load and version.
+func secretBelongsToProject(sec *SecretResponse, projectID string) bool {
+	return ptr.Deref(sec.ProjectID, "") == projectID || slices.Contains(sec.ProjectIDs, projectID)
 }
 
 // GetSecret returns a single secret from the provider.
@@ -350,7 +358,7 @@ func (p *Provider) findSecretByRef(ctx context.Context, key, projectID string) (
 			return nil, fmt.Errorf(errFailedToGetSecret, err)
 		}
 
-		if sec.ProjectID != nil && *sec.ProjectID == projectID {
+		if secretBelongsToProject(sec, projectID) {
 			if remoteSecret != nil {
 				return nil, fmt.Errorf("more than one secret found for project %s with key %s", projectID, key)
 			}

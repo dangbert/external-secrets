@@ -210,7 +210,7 @@ func (s *SdkClient) UpdateSecret(ctx context.Context, putReq SecretPutRequest) (
 // ListSecrets retrieves all secrets from a Bitwarden organization.
 func (s *SdkClient) ListSecrets(ctx context.Context, organizationID string) (*SecretIdentifiersResponse, error) {
 	body := struct {
-		ID string `json:"organizationID"`
+		ID string `json:"organizationId"`
 	}{
 		ID: organizationID,
 	}
