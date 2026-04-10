@@ -19,6 +19,7 @@ package bitwarden
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -165,5 +166,47 @@ func TestSdkClientCreateSecret(t *testing.T) {
 				t.Errorf("CreateSecret() got = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSdkClientListSecretsRequestFieldName verifies that ListSecrets sends the
+// organization ID under the JSON key "organizationId" (lowercase 'd').
+//
+// Currently FAILS because the request body struct uses `json:"organizationID"`
+// (capital 'ID'), so the field sent to the SDK server is "organizationID" and
+// the server silently ignores it, potentially returning an empty secrets list.
+func TestSdkClientListSecretsRequestFieldName(t *testing.T) {
+	var capturedBody []byte
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		data, _ := json.Marshal(&SecretIdentifiersResponse{Data: []SecretIdentifierResponse{}})
+		_, _ = w.Write(data)
+	}))
+	defer testServer.Close()
+
+	s := &SdkClient{
+		apiURL:                testServer.URL,
+		identityURL:           testServer.URL,
+		bitwardenSdkServerURL: testServer.URL,
+		token:                 "token",
+		client:                testServer.Client(),
+	}
+
+	if _, err := s.ListSecrets(context.Background(), "my-org-id"); err != nil {
+		t.Fatalf("ListSecrets() unexpected error: %v", err)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("failed to unmarshal request body %q: %v", capturedBody, err)
+	}
+
+	// The key must be "organizationId" (lowercase 'd') so the SDK server can recognise it.
+	val, ok := body["organizationId"]
+	if !ok {
+		t.Errorf("request body missing field 'organizationId'; got body: %s", capturedBody)
+	}
+	if val != "my-org-id" {
+		t.Errorf("organizationId = %q, want %q", val, "my-org-id")
 	}
 }
