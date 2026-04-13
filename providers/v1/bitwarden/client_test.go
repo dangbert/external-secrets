@@ -37,6 +37,117 @@ const (
 
 var projectID = "e8fc8f9c-2208-446e-9e89-9bc358f39b47"
 
+// TestGetSecretByNameWithProjectIDsOnly tests that GetSecret succeeds when the
+// Bitwarden SDK server returns project membership in the "projectIds" (plural)
+// array field only, with "projectId" (singular) absent/nil.
+//
+// Currently FAILS because findSecretByRef only checks sec.ProjectID and ignores
+// sec.ProjectIDs, so the project-match condition is never satisfied and the
+// function returns nil,nil → "no secret found" error.
+func TestGetSecretByNameWithProjectIDsOnly(t *testing.T) {
+	fakeClient := &FakeClient{}
+	fakeClient.ListSecretReturnsOnCallN(0, &SecretIdentifiersResponse{
+		Data: []SecretIdentifierResponse{
+			{ID: remoteID, Key: testKey, OrganizationID: "orgid"},
+		},
+	})
+	// SDK server returned projectIds (plural) but left projectId (singular) nil,
+	// which happens when the proxy is under load or returns a different response shape.
+	fakeClient.GetSecretReturnsOnCallN(0, &SecretResponse{
+		ID:             remoteID,
+		Key:            testKey,
+		Note:           "note",
+		OrganizationID: "orgid",
+		Value:          "supersecret",
+		ProjectID:      nil,              // absent – the bug trigger
+		ProjectIDs:     []string{projectID}, // present – should be sufficient
+	})
+
+	p := &Provider{
+		kube:      fake.NewFakeClient(),
+		namespace: "default",
+		store: &esv1.SecretStore{
+			Spec: esv1.SecretStoreSpec{
+				Provider: &esv1.SecretStoreProvider{
+					BitwardenSecretsManager: &esv1.BitwardenSecretsManagerProvider{
+						OrganizationID: "orgid",
+						ProjectID:      projectID,
+					},
+				},
+			},
+		},
+		bitwardenSdkClient: fakeClient,
+	}
+
+	got, err := p.GetSecret(context.Background(), esv1.ExternalSecretDataRemoteRef{Key: testKey})
+	if err != nil {
+		t.Fatalf("GetSecret() unexpected error: %v", err)
+	}
+	if string(got) != "supersecret" {
+		t.Errorf("GetSecret() = %q, want %q", string(got), "supersecret")
+	}
+}
+
+// TestPushSecretUpdateWithProjectIDsOnly tests that PushSecret calls UpdateSecret
+// (not CreateSecret) when the existing remote secret has only "projectIds" (plural)
+// set and the value has changed.
+//
+// Currently FAILS because isOnlyValueDifferent checks ptr.Deref(sec.ProjectID, "")
+// which returns "" when ProjectID is nil, so the project never matches and the
+// code falls through to CreateSecret, producing a duplicate.
+func TestPushSecretUpdateWithProjectIDsOnly(t *testing.T) {
+	fakeClient := &FakeClient{}
+	fakeClient.ListSecretReturnsOnCallN(0, &SecretIdentifiersResponse{
+		Data: []SecretIdentifierResponse{
+			{ID: remoteID, Key: testKey, OrganizationID: "orgid"},
+		},
+	})
+	fakeClient.GetSecretReturnsOnCallN(0, &SecretResponse{
+		ID:             remoteID,
+		Key:            testKey,
+		Note:           "",
+		OrganizationID: "orgid",
+		Value:          "old-value",
+		ProjectID:      nil,              // absent – the bug trigger
+		ProjectIDs:     []string{projectID}, // present – should be sufficient
+	})
+	fakeClient.UpdateSecretReturnsOnCallN(0, &SecretResponse{})
+	// Allow CreateSecret to succeed so the test reaches the assertions rather than
+	// failing on an unregistered mock call — the bug makes the code reach CreateSecret
+	// when it should have reached UpdateSecret.
+	fakeClient.CreateSecretReturnsOnCallN(0, &SecretResponse{})
+
+	p := &Provider{
+		kube:      fake.NewFakeClient(),
+		namespace: "default",
+		store: &esv1.SecretStore{
+			Spec: esv1.SecretStoreSpec{
+				Provider: &esv1.SecretStoreProvider{
+					BitwardenSecretsManager: &esv1.BitwardenSecretsManagerProvider{
+						OrganizationID: "orgid",
+						ProjectID:      projectID,
+					},
+				},
+			},
+		},
+		bitwardenSdkClient: fakeClient,
+	}
+
+	secret := &corev1.Secret{Data: map[string][]byte{"key": []byte("new-value")}}
+	data := v1alpha1.PushSecretData{
+		Match: v1alpha1.PushSecretMatch{
+			SecretKey: "key",
+			RemoteRef: v1alpha1.PushSecretRemoteRef{RemoteKey: testKey},
+		},
+	}
+
+	if err := p.PushSecret(context.Background(), secret, data); err != nil {
+		t.Fatalf("PushSecret() unexpected error: %v", err)
+	}
+	assert.Equal(t, 1, fakeClient.updateSecretCalledN, "expected UpdateSecret to be called once")
+	assert.Equal(t, 0, fakeClient.createSecretCalledN, "expected CreateSecret NOT to be called")
+}
+
 func TestProviderDeleteSecret(t *testing.T) {
 	type fields struct {
 		kube       client.Client
